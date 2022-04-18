@@ -61,11 +61,12 @@ type TSDBStatus struct {
 
 // TrackedLabelNames : a struct to keep track of which metrics we are currently tracking
 type TrackedLabelNames struct {
-	SeriesCountByMetricNameLabels     [10]string
-	SeriesCountByMetricNamePerLabel   map[string][10]prometheus.Labels
-	LabelValueCountByLabelNameLabels  [10]string
-	MemoryInBytesByLabelNameLabels    [10]string
-	SeriesCountByLabelValuePairLabels [10]string
+	SeriesCountByMetricNameLabels                 [10]string
+	LabelValueCountByLabelNameLabels              [10]string
+	MemoryInBytesByLabelNameLabels                [10]string
+	SeriesCountByLabelValuePairLabels             [10]string
+	SeriesCountByMetricNamePerLabelLabels         map[string][10]prometheus.Labels
+	LabelValueCountByLabelNamePerMetricNameLabels map[string][10]prometheus.Labels
 }
 
 // PrometheusCardinalityInstance stores all that is required to know about  prometheus instance
@@ -154,8 +155,22 @@ func (promInstance *PrometheusCardinalityInstance) ExposeTSDBStatus(seriesCountB
 	return nil
 
 }
+func (promInstance *PrometheusCardinalityInstance) ExposeSeriesCountByMetricsNamePerLabels(metrics *PrometheusCardinalityMetric) (err error) {
+	for _, value := range promInstance.LatestTSDBStatus.Data.LabelValueCountByLabelName {
+		fmt.Println("ExposeSeriesCountByMetricsNamePerLabels", value.Label)
+		if value.Label == "" {
+			continue
+		}
 
-func (promInstance *PrometheusCardinalityInstance) ExposeSeriesCountByMetricsNamePerLabels(label string, SeriesCountByMetricNamePerLabelGauge *PrometheusCardinalityMetric) (err error) {
+		if err := promInstance.exposeSeriesCountByMetricsNamePerLabel(value.Label, metrics); err != nil {
+			fmt.Println(err)
+			return err
+		}
+	}
+	return nil
+}
+
+func (promInstance *PrometheusCardinalityInstance) exposeSeriesCountByMetricsNamePerLabel(label string, metrics *PrometheusCardinalityMetric) (err error) {
 	prometheusClient := &http.Client{}
 	q, _ := url.ParseQuery(fmt.Sprintf(`match[]={%s!=""}`, label))
 	body, err := promInstance.fetchTSDBStatus(prometheusClient, q)
@@ -176,20 +191,69 @@ func (promInstance *PrometheusCardinalityInstance) ExposeSeriesCountByMetricsNam
 		}
 	}
 
-	if promInstance.TrackedLabels.SeriesCountByMetricNamePerLabel == nil {
-		promInstance.TrackedLabels.SeriesCountByMetricNamePerLabel = map[string][10]prometheus.Labels{}
+	if promInstance.TrackedLabels.SeriesCountByMetricNamePerLabelLabels == nil {
+		promInstance.TrackedLabels.SeriesCountByMetricNamePerLabelLabels = map[string][10]prometheus.Labels{}
 	}
-	if _, ok := promInstance.TrackedLabels.SeriesCountByMetricNamePerLabel[label]; !ok {
-		promInstance.TrackedLabels.SeriesCountByMetricNamePerLabel[label] = [10]prometheus.Labels{}
+	if _, ok := promInstance.TrackedLabels.SeriesCountByMetricNamePerLabelLabels[label]; !ok {
+		promInstance.TrackedLabels.SeriesCountByMetricNamePerLabelLabels[label] = [10]prometheus.Labels{}
 	}
-	promInstance.TrackedLabels.SeriesCountByMetricNamePerLabel[label], err = SeriesCountByMetricNamePerLabelGauge.updateMetricNew(labelsValuePairs, promInstance.TrackedLabels.SeriesCountByMetricNamePerLabel[label], promInstance.InstanceName, promInstance.ShardedInstanceName, promInstance.Namespace)
+	promInstance.TrackedLabels.SeriesCountByMetricNamePerLabelLabels[label], err = metrics.updateMetricByPrometheusLabels(labelsValuePairs, promInstance.TrackedLabels.SeriesCountByMetricNamePerLabelLabels[label], promInstance.InstanceName, promInstance.ShardedInstanceName, promInstance.Namespace)
 	if err != nil {
 		return fmt.Errorf("Can't update metrics: %v", err)
 	}
 	return nil
 }
 
-func (Metric *PrometheusCardinalityMetric) updateMetricNew(newLabelsValues [10]prometheusLabelValuePair, trackedLabels [10]prometheus.Labels, prometheusInstance string, shardedInstance string, namespace string) (newTrackedLabels [10]prometheus.Labels, err error) {
+func (promInstance *PrometheusCardinalityInstance) ExposeLabelCountByLabelNameNamePerMetricNames(metrics *PrometheusCardinalityMetric) (err error) {
+	for _, value := range promInstance.LatestTSDBStatus.Data.SeriesCountByMetricName {
+		fmt.Println("ExposeLabelCountByLabelNameNamePerMetricNames", value.Label)
+		if value.Label == "" {
+			continue
+		}
+
+		if err := promInstance.exposeLabelCountByLabelNameNamePerMetricName(value.Label, metrics); err != nil {
+			fmt.Println(err)
+			return err
+		}
+	}
+	return nil
+}
+
+func (promInstance *PrometheusCardinalityInstance) exposeLabelCountByLabelNameNamePerMetricName(metricName string, metrics *PrometheusCardinalityMetric) (err error) {
+	prometheusClient := &http.Client{}
+	q, _ := url.ParseQuery(fmt.Sprintf(`match[]={__name__="%s"}`, metricName))
+	body, err := promInstance.fetchTSDBStatus(prometheusClient, q)
+	tsdbStatus := &TSDBStatus{}
+	err = json.Unmarshal(body, tsdbStatus)
+	if err != nil {
+		return fmt.Errorf("Can't parse json: %v", err)
+	}
+
+	labelsValuePairs := [10]prometheusLabelValuePair{}
+	for idx, pair := range tsdbStatus.Data.LabelValueCountByLabelName {
+		if len(pair.Label) > 0 {
+			labels := prometheus.Labels{
+				"metric": metricName,
+				"label":  pair.Label,
+			}
+			labelsValuePairs[idx] = prometheusLabelValuePair{labels, pair.Value}
+		}
+	}
+
+	if promInstance.TrackedLabels.LabelValueCountByLabelNamePerMetricNameLabels == nil {
+		promInstance.TrackedLabels.LabelValueCountByLabelNamePerMetricNameLabels = map[string][10]prometheus.Labels{}
+	}
+	if _, ok := promInstance.TrackedLabels.LabelValueCountByLabelNamePerMetricNameLabels[metricName]; !ok {
+		promInstance.TrackedLabels.LabelValueCountByLabelNamePerMetricNameLabels[metricName] = [10]prometheus.Labels{}
+	}
+	promInstance.TrackedLabels.LabelValueCountByLabelNamePerMetricNameLabels[metricName], err = metrics.updateMetricByPrometheusLabels(labelsValuePairs, promInstance.TrackedLabels.SeriesCountByMetricNamePerLabelLabels[metricName], promInstance.InstanceName, promInstance.ShardedInstanceName, promInstance.Namespace)
+	if err != nil {
+		return fmt.Errorf("Can't update metrics: %v", err)
+	}
+	return nil
+}
+
+func (Metric *PrometheusCardinalityMetric) updateMetricByPrometheusLabels(newLabelsValues [10]prometheusLabelValuePair, trackedLabels [10]prometheus.Labels, prometheusInstance string, shardedInstance string, namespace string) (newTrackedLabels [10]prometheus.Labels, err error) {
 	for idx, prometheusLabelValuePair := range newLabelsValues {
 		prometheusLabels := prometheusLabelValuePair.Labels
 		if len(prometheusLabels) == 0 {

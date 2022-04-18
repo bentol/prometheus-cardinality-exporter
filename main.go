@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -9,16 +10,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/yaml.v3"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	"prometheus-cardinality-exporter/cardinality"
+
 	"github.com/cenkalti/backoff"
 	"github.com/jessevdk/go-flags"
 	logging "github.com/sirupsen/logrus"
-	"github.com/thought-machine/prometheus-cardinality-exporter/cardinality"
 )
 
 var log = logging.WithFields(logging.Fields{})
@@ -36,6 +39,7 @@ var opts struct {
 }
 
 func collectMetrics() {
+	ctx := context.Background()
 
 	// Number of times to retry before fetching the data before giving up.
 	// If the number of retries is exhausted, it will wait until the next time it has to query the Prometheus API.
@@ -95,7 +99,7 @@ func collectMetrics() {
 			var namespaceList []string
 			if len(opts.Namespaces) == 0 {
 				// Accesses the API to list all namespaces in the cluster
-				namespaces, _ := clientset.CoreV1().Namespaces().List(v1.ListOptions{})
+				namespaces, _ := clientset.CoreV1().Namespaces().List(ctx, v1.ListOptions{})
 				for _, namespaceObj := range namespaces.Items {
 					namespaceList = append(namespaceList, namespaceObj.ObjectMeta.GetName())
 				}
@@ -106,7 +110,7 @@ func collectMetrics() {
 			for _, namespace := range namespaceList {
 
 				// Accesses the API to list all endpoints and services which match the label selector in the given namespace
-				endpointsList, _ := clientset.CoreV1().Endpoints(namespace).List(v1.ListOptions{LabelSelector: opts.Selector})
+				endpointsList, _ := clientset.CoreV1().Endpoints(namespace).List(ctx, v1.ListOptions{LabelSelector: opts.Selector})
 
 				if err != nil {
 					log.Fatalf("Error obtaining endpoints matching selector (%v) in namespace (%v): %v", namespace, opts.Selector, err.Error())
@@ -135,10 +139,12 @@ func collectMetrics() {
 									ShardedInstanceName: shardedInstanceName,
 									InstanceAddress:     "http://" + address.IP + ":9090",
 									TrackedLabels: cardinality.TrackedLabelNames{
-										SeriesCountByMetricNameLabels:     [10]string{},
-										LabelValueCountByLabelNameLabels:  [10]string{},
-										MemoryInBytesByLabelNameLabels:    [10]string{},
-										SeriesCountByLabelValuePairLabels: [10]string{},
+										SeriesCountByMetricNameLabels:                 [10]string{},
+										LabelValueCountByLabelNameLabels:              [10]string{},
+										MemoryInBytesByLabelNameLabels:                [10]string{},
+										SeriesCountByLabelValuePairLabels:             [10]string{},
+										SeriesCountByMetricNamePerLabelLabels:         map[string][10]prometheus.Labels{},
+										LabelValueCountByLabelNamePerMetricNameLabels: map[string][10]prometheus.Labels{},
 									},
 								}
 							} else {
@@ -185,10 +191,11 @@ func collectMetrics() {
 					InstanceAddress:     prometheusInstanceAddress,
 					AuthValue:           promAPIAuthValues[prometheusInstanceAddress],
 					TrackedLabels: cardinality.TrackedLabelNames{
-						SeriesCountByMetricNameLabels:     [10]string{},
-						LabelValueCountByLabelNameLabels:  [10]string{},
-						MemoryInBytesByLabelNameLabels:    [10]string{},
-						SeriesCountByLabelValuePairLabels: [10]string{},
+						SeriesCountByMetricNameLabels:                 [10]string{},
+						LabelValueCountByLabelNameLabels:              [10]string{},
+						MemoryInBytesByLabelNameLabels:                [10]string{},
+						SeriesCountByMetricNamePerLabelLabels:         map[string][10]prometheus.Labels{},
+						LabelValueCountByLabelNamePerMetricNameLabels: map[string][10]prometheus.Labels{},
 					},
 				}
 			}
@@ -207,7 +214,7 @@ func collectMetrics() {
 
 			// Fetch the data from Prometheus
 			err := backoff.Retry(func() error {
-				return cardinalityInfoByInstance[instanceID].FetchTSDBStatus(prometheusClient)
+				return cardinalityInfoByInstance[instanceID].PreFetchTSDBStatus(prometheusClient)
 			}, backoff.WithMaxRetries(backoff.NewExponentialBackOff(), numRetries))
 			if err != nil {
 				log.WithError(err).Warningf("Error fetching Prometheus status: %v", err)
@@ -215,13 +222,18 @@ func collectMetrics() {
 				continue
 			}
 
-			// Expose data on /metrics
+			// Expose main data
 			err = backoff.Retry(func() error {
 				return cardinalityInfoByInstance[instanceID].ExposeTSDBStatus(&cardinality.SeriesCountByMetricNameGauge, &cardinality.LabelValueCountByLabelNameGauge, &cardinality.MemoryInBytesByLabelNameGauge, &cardinality.SeriesCountByLabelValuePairGauge)
 			}, backoff.WithMaxRetries(backoff.NewExponentialBackOff(), numRetries))
 			if err != nil {
 				log.WithError(err).Warningf("Error exposing Prometheus metrics: %v", err)
 			}
+
+			// expose series count by metrics name per labelName
+			go cardinalityInfoByInstance[instanceID].ExposeSeriesCountByMetricsNamePerLabels(&cardinality.SeriesCountByMetricNamePerLabelGauge)
+			// expose label count by label name per metricName
+			go cardinalityInfoByInstance[instanceID].ExposeLabelCountByLabelNameNamePerMetricNames(&cardinality.LabelValueCountByLabelNamePerMetricNameGauge)
 		}
 
 		// Sleep until next metric update

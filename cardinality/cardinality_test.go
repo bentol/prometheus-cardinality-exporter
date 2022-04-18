@@ -102,6 +102,97 @@ func (ts *CardinalitySuite) TestPreFetchTSDBStatus() {
 	}
 }
 
+func (ts *CardinalitySuite) TestExposeLabelsCountByLabelNamePerMetricNames() {
+	var myTests = []struct {
+		name               string
+		metricName         string
+		responseStatusCode int
+		incomingTSDBStatus TSDBStatus
+		prometheusInstance PrometheusCardinalityInstance
+		expectedMetrics    map[string]bool
+	}{
+		{
+			name:               "when return empty",
+			metricName:         "node_load1",
+			responseStatusCode: 200,
+			incomingTSDBStatus: TSDBStatus{
+				Status: "success",
+				Data: TSDBData{
+					[10]labelValuePair{},
+					[10]labelValuePair{},
+					[10]labelValuePair{},
+					[10]labelValuePair{},
+				},
+			},
+			prometheusInstance: PrometheusCardinalityInstance{
+				Namespace:           "namespace-2",
+				InstanceName:        "prometheus-test-2",
+				ShardedInstanceName: "prometheus-shard-2",
+				TrackedLabels:       TrackedLabelNames{},
+			},
+			expectedMetrics: map[string]bool{},
+		},
+		{
+			name:               "when use return some metrics",
+			metricName:         "node_load1",
+			responseStatusCode: 200,
+			incomingTSDBStatus: TSDBStatus{
+				Status: "success",
+				Data: TSDBData{
+					[10]labelValuePair{},
+					[10]labelValuePair{
+						{Label: "instance", Value: 10},
+						{Label: "team", Value: 20},
+					},
+					[10]labelValuePair{},
+					[10]labelValuePair{},
+				},
+			},
+			prometheusInstance: PrometheusCardinalityInstance{
+				Namespace:           "namespace-2",
+				InstanceName:        "prometheus-test-2",
+				ShardedInstanceName: "prometheus-shard-2",
+				TrackedLabels:       TrackedLabelNames{},
+			},
+			expectedMetrics: map[string]bool{
+				`cardinality_exporter_label_value_count_by_label_name_per_metric_name_total{instance_namespace="namespace-2",label="instance",metric="node_load1",scraped_instance="prometheus-test-2",sharded_instance="prometheus-shard-2"} 10`: true,
+				`cardinality_exporter_label_value_count_by_label_name_per_metric_name_total{instance_namespace="namespace-2",label="team",metric="node_load1",scraped_instance="prometheus-test-2",sharded_instance="prometheus-shard-2"} 20`:     true,
+			},
+		},
+	}
+
+	for _, tt := range myTests {
+		ts.T().Run(tt.name, func(t *testing.T) {
+			// Create /metrics endpoint on next available port
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/api/v1/status/tsdb", r.URL.Path)
+				expectedQuery, _ := url.ParseQuery(fmt.Sprintf(`match[]={__name__="%s"}`, tt.metricName))
+				assert.Equal(t, expectedQuery, r.URL.Query())
+				w.WriteHeader(tt.responseStatusCode)
+				payload, _ := json.Marshal(tt.incomingTSDBStatus)
+				w.Write(payload)
+			}))
+			tt.prometheusInstance.InstanceAddress = srv.URL
+
+			tt.prometheusInstance.ExposeLabelCountByLabelNameNamePerMetricNames(tt.metricName, &LabelValueCountByLabelNamePerMetricNameGauge)
+
+			req, _ := http.NewRequest("GET", "/metrics", nil)
+			rr := httptest.NewRecorder()
+			promhttp.Handler().ServeHTTP(rr, req)
+			assert.Equal(t, tt.responseStatusCode, rr.Result().StatusCode)
+			scanner := bufio.NewScanner(strings.NewReader(rr.Body.String()))
+			for scanner.Scan() {
+				if tt.expectedMetrics[scanner.Text()] {
+					delete(tt.expectedMetrics, scanner.Text())
+				}
+			}
+
+			// Assert that there are no expected metrics unaccounted for
+			assert.Equal(ts.T(), 0, len(tt.expectedMetrics))
+		})
+	}
+}
+
 func (ts *CardinalitySuite) TestExposeSeriesCountByMetricsNamePerLabels() {
 	var myTests = []struct {
 		name               string

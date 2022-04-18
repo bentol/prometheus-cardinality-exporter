@@ -91,6 +91,23 @@ var (
 			},
 		),
 	}
+
+	LabelValueCountByLabelNamePerMetricNameGauge = PrometheusCardinalityMetric{
+		GaugeVec: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Subsystem: "cardinality_exporter",
+				Name:      "label_value_count_by_label_name_per_metric_name_total",
+				Help:      "A list of the label names and their value count.",
+			},
+			[]string{
+				"metric",
+				"label",
+				"scraped_instance",
+				"sharded_instance",
+				"instance_namespace",
+			},
+		),
+	}
 )
 
 func init() {
@@ -99,5 +116,6 @@ func init() {
 	prometheus.MustRegister(MemoryInBytesByLabelNameGauge.GaugeVec)
 	prometheus.MustRegister(SeriesCountByLabelValuePairGauge.GaugeVec)
 	prometheus.MustRegister(SeriesCountByMetricNamePerLabelGauge.GaugeVec)
+	prometheus.MustRegister(LabelValueCountByLabelNamePerMetricNameGauge.GaugeVec)
 
 }
