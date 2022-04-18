@@ -9,6 +9,8 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -78,7 +80,7 @@ func AuthHeaderCorrect(expectedAuthHeaderValue string) gomock.Matcher {
 }
 
 // This tests the FetchTSDBStatus function on all of the test cases
-func (ts *CardinalitySuite) TestFetchTSDBStatus() {
+func (ts *CardinalitySuite) TestPreFetchTSDBStatus() {
 
 	for _, tt := range cardinalityTests {
 
@@ -89,7 +91,7 @@ func (ts *CardinalitySuite) TestFetchTSDBStatus() {
 			Body:       ioutil.NopCloser(bytes.NewBufferString(tt.json)),
 		}
 		ts.MockPrometheusClient.EXPECT().Do(AuthHeaderCorrect(tt.expectedAuthHeaderValue)).Return(response, nil)
-		err := tt.prometheusInstance.FetchTSDBStatus(ts.MockPrometheusClient)
+		err := tt.prometheusInstance.PreFetchTSDBStatus(ts.MockPrometheusClient)
 
 		assert.Equal(ts.T(), tt.incomingTSDBStatus, tt.prometheusInstance.LatestTSDBStatus)
 		assert.Equal(ts.T(), err, nil)
@@ -97,6 +99,188 @@ func (ts *CardinalitySuite) TestFetchTSDBStatus() {
 		// reset the LatestTSDBStatus, so that it doesn't affect later tests
 		tt.prometheusInstance.LatestTSDBStatus = *new(TSDBStatus)
 
+	}
+}
+
+func (ts *CardinalitySuite) TestExposeLabelsCountByLabelNamePerMetricNames() {
+	var myTests = []struct {
+		name               string
+		metricName         string
+		responseStatusCode int
+		incomingTSDBStatus TSDBStatus
+		prometheusInstance PrometheusCardinalityInstance
+		expectedMetrics    map[string]bool
+	}{
+		{
+			name:               "when return empty",
+			metricName:         "node_load1",
+			responseStatusCode: 200,
+			incomingTSDBStatus: TSDBStatus{
+				Status: "success",
+				Data: TSDBData{
+					[10]labelValuePair{},
+					[10]labelValuePair{},
+					[10]labelValuePair{},
+					[10]labelValuePair{},
+				},
+			},
+			prometheusInstance: PrometheusCardinalityInstance{
+				Namespace:           "namespace-2",
+				InstanceName:        "prometheus-test-2",
+				ShardedInstanceName: "prometheus-shard-2",
+				TrackedLabels:       TrackedLabelNames{},
+			},
+			expectedMetrics: map[string]bool{},
+		},
+		{
+			name:               "when use return some metrics",
+			metricName:         "node_load1",
+			responseStatusCode: 200,
+			incomingTSDBStatus: TSDBStatus{
+				Status: "success",
+				Data: TSDBData{
+					[10]labelValuePair{},
+					[10]labelValuePair{
+						{Label: "instance", Value: 10},
+						{Label: "team", Value: 20},
+					},
+					[10]labelValuePair{},
+					[10]labelValuePair{},
+				},
+			},
+			prometheusInstance: PrometheusCardinalityInstance{
+				Namespace:           "namespace-2",
+				InstanceName:        "prometheus-test-2",
+				ShardedInstanceName: "prometheus-shard-2",
+				TrackedLabels:       TrackedLabelNames{},
+			},
+			expectedMetrics: map[string]bool{
+				`cardinality_exporter_label_value_count_by_label_name_per_metric_name_total{instance_namespace="namespace-2",label="instance",metric="node_load1",scraped_instance="prometheus-test-2",sharded_instance="prometheus-shard-2"} 10`: true,
+				`cardinality_exporter_label_value_count_by_label_name_per_metric_name_total{instance_namespace="namespace-2",label="team",metric="node_load1",scraped_instance="prometheus-test-2",sharded_instance="prometheus-shard-2"} 20`:     true,
+			},
+		},
+	}
+
+	for _, tt := range myTests {
+		ts.T().Run(tt.name, func(t *testing.T) {
+			// Create /metrics endpoint on next available port
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/api/v1/status/tsdb", r.URL.Path)
+				expectedQuery, _ := url.ParseQuery(fmt.Sprintf(`match[]={__name__="%s"}`, tt.metricName))
+				assert.Equal(t, expectedQuery, r.URL.Query())
+				w.WriteHeader(tt.responseStatusCode)
+				payload, _ := json.Marshal(tt.incomingTSDBStatus)
+				w.Write(payload)
+			}))
+			tt.prometheusInstance.InstanceAddress = srv.URL
+
+			tt.prometheusInstance.ExposeLabelCountByLabelNameNamePerMetricNames(tt.metricName, &LabelValueCountByLabelNamePerMetricNameGauge)
+
+			req, _ := http.NewRequest("GET", "/metrics", nil)
+			rr := httptest.NewRecorder()
+			promhttp.Handler().ServeHTTP(rr, req)
+			assert.Equal(t, tt.responseStatusCode, rr.Result().StatusCode)
+			scanner := bufio.NewScanner(strings.NewReader(rr.Body.String()))
+			for scanner.Scan() {
+				if tt.expectedMetrics[scanner.Text()] {
+					delete(tt.expectedMetrics, scanner.Text())
+				}
+			}
+
+			// Assert that there are no expected metrics unaccounted for
+			assert.Equal(ts.T(), 0, len(tt.expectedMetrics))
+		})
+	}
+}
+
+func (ts *CardinalitySuite) TestExposeSeriesCountByMetricsNamePerLabels() {
+	var myTests = []struct {
+		name               string
+		label              string
+		responseStatusCode int
+		incomingTSDBStatus TSDBStatus
+		prometheusInstance PrometheusCardinalityInstance
+		expectedMetrics    map[string]bool
+	}{
+		{
+			name:               "when return empty",
+			label:              "path",
+			responseStatusCode: 200,
+			incomingTSDBStatus: TSDBStatus{
+				Status: "success",
+				Data: TSDBData{
+					[10]labelValuePair{},
+					[10]labelValuePair{},
+					[10]labelValuePair{},
+					[10]labelValuePair{},
+				},
+			},
+			prometheusInstance: PrometheusCardinalityInstance{
+				Namespace:           "namespace-2",
+				InstanceName:        "prometheus-test-2",
+				ShardedInstanceName: "prometheus-shard-2",
+				TrackedLabels:       TrackedLabelNames{},
+			},
+			expectedMetrics: map[string]bool{},
+		},
+		{
+			name:               "when use return some metrics",
+			label:              "path",
+			responseStatusCode: 200,
+			incomingTSDBStatus: TSDBStatus{
+				Status: "success",
+				Data: TSDBData{
+					[10]labelValuePair{
+						{Label: "disk_info", Value: 10},
+						{Label: "disk_size", Value: 20},
+					},
+					[10]labelValuePair{},
+					[10]labelValuePair{},
+					[10]labelValuePair{},
+				},
+			},
+			prometheusInstance: PrometheusCardinalityInstance{
+				Namespace:           "namespace-2",
+				InstanceName:        "prometheus-test-2",
+				ShardedInstanceName: "prometheus-shard-2",
+				TrackedLabels:       TrackedLabelNames{},
+			},
+			expectedMetrics: map[string]bool{
+				`cardinality_exporter_series_count_by_metric_name_per_label_total{instance_namespace="namespace-2",label="path",metric="disk_info",scraped_instance="prometheus-test-2",sharded_instance="prometheus-shard-2"} 10`: true,
+				`cardinality_exporter_series_count_by_metric_name_per_label_total{instance_namespace="namespace-2",label="path",metric="disk_size",scraped_instance="prometheus-test-2",sharded_instance="prometheus-shard-2"} 20`: true,
+			},
+		},
+	}
+
+	for _, tt := range myTests {
+		ts.T().Run(tt.name, func(t *testing.T) {
+			// Create /metrics endpoint on next available port
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/api/v1/status/tsdb", r.URL.Path)
+				expectedQuery, _ := url.ParseQuery(fmt.Sprintf(`match[]={%s!=""}`, tt.label))
+				assert.Equal(t, expectedQuery, r.URL.Query())
+				w.WriteHeader(tt.responseStatusCode)
+				payload, _ := json.Marshal(tt.incomingTSDBStatus)
+				w.Write(payload)
+			}))
+			tt.prometheusInstance.InstanceAddress = srv.URL
+
+			tt.prometheusInstance.ExposeSeriesCountByMetricsNamePerLabels(tt.label, &SeriesCountByMetricNamePerLabelGauge)
+
+			req, _ := http.NewRequest("GET", "/metrics", nil)
+			rr := httptest.NewRecorder()
+			promhttp.Handler().ServeHTTP(rr, req)
+			assert.Equal(t, tt.responseStatusCode, rr.Result().StatusCode)
+			scanner := bufio.NewScanner(strings.NewReader(rr.Body.String()))
+			for scanner.Scan() {
+				if tt.expectedMetrics[scanner.Text()] {
+					delete(tt.expectedMetrics, scanner.Text())
+				}
+			}
+
+			// Assert that there are no expected metrics unaccounted for
+			assert.Equal(ts.T(), 0, len(tt.expectedMetrics))
+		})
 	}
 }
 
@@ -160,7 +344,7 @@ func (mockMetric *PrometheusCardinalityMetric) expectMetricUpdates(trackedLabels
 // E2E test
 // 1. Creates a /metrics endpoint
 // 2. Creates another endpoints to act as the Prometheus API
-// 3. Calls the FetchTSDBStatus function to call the mock API
+// 3. Calls the PreFetchTSDBStatus function to call the mock API
 // 4. Calls the ExposeTSDBStatus function to expose the fetched metrics on the /metrics endpoint
 // 5. Scrapes the /metrics endpoint and checks that the result is as expected
 func (ts *CardinalitySuite) TestE2E() {
@@ -206,7 +390,7 @@ func (ts *CardinalitySuite) TestE2E() {
 		// Fetch metrics from test API
 		tt.prometheusInstance.LatestTSDBStatus = *new(TSDBStatus)
 		tt.prometheusInstance.InstanceAddress = fmt.Sprintf("http://localhost:%v", mockAPIPort)
-		err = tt.prometheusInstance.FetchTSDBStatus(&http.Client{})
+		err = tt.prometheusInstance.PreFetchTSDBStatus(&http.Client{})
 		if err != nil {
 			log.WithError(err).Warningf("Error fetching Prometheus status: %v", err)
 		}
