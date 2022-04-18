@@ -62,7 +62,7 @@ type TSDBStatus struct {
 // TrackedLabelNames : a struct to keep track of which metrics we are currently tracking
 type TrackedLabelNames struct {
 	SeriesCountByMetricNameLabels     [10]string
-	SeriesCountByMetricNamePerLabel   [10]prometheus.Labels
+	SeriesCountByMetricNamePerLabel   map[string][10]prometheus.Labels
 	LabelValueCountByLabelNameLabels  [10]string
 	MemoryInBytesByLabelNameLabels    [10]string
 	SeriesCountByLabelValuePairLabels [10]string
@@ -175,7 +175,14 @@ func (promInstance *PrometheusCardinalityInstance) ExposeSeriesCountByMetricsNam
 			labelsValuePairs[idx] = prometheusLabelValuePair{labels, pair.Value}
 		}
 	}
-	promInstance.TrackedLabels.SeriesCountByMetricNamePerLabel, err = SeriesCountByMetricNamePerLabelGauge.updateMetricNew(labelsValuePairs, promInstance.TrackedLabels.SeriesCountByMetricNamePerLabel, promInstance.InstanceName, promInstance.ShardedInstanceName, promInstance.Namespace)
+
+	if promInstance.TrackedLabels.SeriesCountByMetricNamePerLabel == nil {
+		promInstance.TrackedLabels.SeriesCountByMetricNamePerLabel = map[string][10]prometheus.Labels{}
+	}
+	if _, ok := promInstance.TrackedLabels.SeriesCountByMetricNamePerLabel[label]; !ok {
+		promInstance.TrackedLabels.SeriesCountByMetricNamePerLabel[label] = [10]prometheus.Labels{}
+	}
+	promInstance.TrackedLabels.SeriesCountByMetricNamePerLabel[label], err = SeriesCountByMetricNamePerLabelGauge.updateMetricNew(labelsValuePairs, promInstance.TrackedLabels.SeriesCountByMetricNamePerLabel[label], promInstance.InstanceName, promInstance.ShardedInstanceName, promInstance.Namespace)
 	if err != nil {
 		return fmt.Errorf("Can't update metrics: %v", err)
 	}
